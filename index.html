@@ -1,0 +1,415 @@
+<html>
+  <head>
+    <style>
+        body, html { 
+          width: 100%;
+          height: 100%;
+          border: 0px;
+          padding: 0px;
+          margin: 0px;
+        }
+        #gl-canvas {
+          text-align: center;
+          width: 100%;
+          height: 100%;
+        } 
+    </style>
+
+    <title>Ray Tracing</title>
+    <meta http-equiv="content-type" content="text/html; charset=ISO-8859-1">
+
+    <!-- Shaders -->
+    <script id="shader-vs" type="x-shader/x-vertex">
+      uniform float u_aspectRatio;
+
+      attribute vec3 a_VertexPosition;
+
+      varying vec2 fPos;
+
+      void main(void) {
+        gl_Position = vec4(a_VertexPosition, 1.0);
+        fPos = vec2(a_VertexPosition[0], a_VertexPosition[1]);
+      }
+    </script>
+    <script id="shader-fs" type="x-shader/x-fragment">
+      precision mediump float;
+
+      // INPUT DATA
+      varying vec2 fPos;
+      uniform float u_time;
+
+      // CONSTANTS
+      vec3 backgroundColor = vec3(0.0, 0.0, 0.1);
+      const int SPHERE = 0;
+      const int PLANE = 1;
+      const int LIGHT = 2;
+      const int MAX_STEPS = 5;
+
+      const float MAX_FLOAT = 1000000.0;
+
+      const int MAX_SPHERES = 2;
+      const int MAX_PLANES = 1;
+      const int MAX_LIGHTS = 1;
+
+      // GLOBAL VARIABLES
+      vec3 p0;
+
+      // HELPER STRUCTS
+      struct Color {
+        vec3 ambient;
+        vec3 diffuse;
+        vec3 specular;
+      };
+
+      struct Object {
+        int id;           // index into the sceneObject array
+        int type;         // denotes whether the object is a SPHERE, PLANE, or LIGHT
+        vec3 center;      // center point of the object
+        vec3 normal;      // normal vector | plane property
+        float radius;     // radius of the object | sphere property
+        Color color;      // color of the object
+      };
+
+      struct IntersectionData {
+        vec3 point;
+        Object object;
+        int status; // 0 = no intersection | 1 = intersection occurred | 2 = light intersection
+        float t;
+      };
+
+      struct Camera {
+        vec3 eye;
+        float screenZ;
+      };
+
+      // SCENE OBJECTS
+      Object testBall;
+      Object testBall2;
+      Object testLight;
+      Object testPlane;
+      Object sceneObjects[MAX_SPHERES + MAX_PLANES + MAX_LIGHTS];
+
+      /**************************************************************
+       ******************* INTERSECTION FUNCTIONS *******************
+       **************************************************************/
+      bool floatEqualsZero(float f) {
+        float tolerance = 0.00000000001;
+        if (f < tolerance && f > -tolerance)
+          return true;
+        else
+          return false;
+      }
+
+      // check if the ray shot from the given p(osition) in the given d(irection) intersects the given object
+      IntersectionData intersectSphere(vec3 p, vec3 d, Object sphere) {
+        vec3 pc = sphere.center;
+        float r = sphere.radius;
+
+        float c = dot((p - pc), (p - pc)) - (r * r); 
+        float b = dot(2.0 * d, p - pc);
+        float a = dot(d, d);
+
+        float t1 = (-b - sqrt(b * b - 4.0 * a * c)) / (2.0 * a);
+        float t2 = (-b + sqrt(b * b - 4.0 * a * c)) / (2.0 * a);
+        
+        float minT = min(t1, t2);
+
+        float discriminant = b * b - (4.0 * a * c);
+
+        if (discriminant < 0.0 || minT < 0.0) {
+          IntersectionData data;
+          data.point = vec3(0.0, 0.0, 0.0);
+          data.object = sphere;
+          data.status = 0;  // no intersection occurred
+          return data;
+        }
+        else {
+          IntersectionData data;
+          data.point = vec3(p + (minT * d));
+          data.object = sphere;
+          if (sphere.type == LIGHT) 
+            data.status = 2;
+          else
+            data.status = 1;
+          data.t = minT;
+          return data;
+        }               
+      }
+
+      IntersectionData intersectPlane(vec3 p, vec3 d, Object plane) {
+        d = normalize(d);
+        vec3 Q = plane.center;
+        vec3 N = plane.normal;
+        float denominator = dot(N, d);
+
+        if(floatEqualsZero(denominator)) {
+          // N and d are orthogonal, and thus ray is parallel to plane
+          IntersectionData data;
+          data.point = vec3(0.0, 0.0, 0.0);
+          data.object = plane;
+          data.status = 0;
+          data.t = MAX_FLOAT;
+          return data;
+        }
+
+        float t = dot(N, Q - p);
+        t = t / denominator;
+
+        if (t < 0.0) {
+          // plane is behind the eye
+          IntersectionData data;
+          data.point = vec3(0.0, 0.0, 0.0);
+          data.object = plane;
+          data.status = 0;
+          return data;
+        } else {
+          IntersectionData data;
+          data.point = vec3(p + (t * d));
+          data.object = plane;
+          data.status = 1;
+          data.t = t;
+          return data;
+        }
+      }
+
+      IntersectionData intersectLight(vec3 p, vec3 direction, Object light) {
+        
+        return intersectSphere(p, direction, light);
+      }
+
+      IntersectionData intersect(vec3 p, vec3 direction, Object object) {
+        IntersectionData closestIntersection;
+        closestIntersection.status = 0;
+        closestIntersection.t = MAX_FLOAT;
+
+        for (int i = 0; i < MAX_SPHERES + MAX_PLANES + MAX_LIGHTS; ++i) {
+          if (i != object.id) {
+            IntersectionData newIntersection;
+            newIntersection.status = 0;
+            if (sceneObjects[i].type == SPHERE)     { newIntersection = intersectSphere(p, direction, sceneObjects[i]); }
+            else if (sceneObjects[i].type == PLANE) { 
+              newIntersection = intersectPlane(p, direction, sceneObjects[i]); 
+              // newIntersection.status = 1;
+            }
+            else if (sceneObjects[i].type == LIGHT) { newIntersection = intersectLight(p, direction, sceneObjects[i]); }
+
+            if (newIntersection.status != 0) {
+              if (sceneObjects[i].type != LIGHT) {
+                if (newIntersection.t < closestIntersection.t) {
+                  closestIntersection = newIntersection;
+                }
+              }
+            }
+          }
+        }
+
+        return closestIntersection;
+      }
+
+      vec3 getNormal(IntersectionData data) {
+        vec3 normal = vec3(0.0, 0.0, 0.0);
+        if (data.object.type == SPHERE) {
+          normal = normalize(data.point - data.object.center);
+        }
+        else if (data.object.type == PLANE) {
+          normal = data.object.normal;
+        }
+        else if (data.object.type == LIGHT) {
+          normal = data.point - data.object.center;
+          normal = normalize(normal);
+        }
+        return normal;
+      }
+
+      vec3 blinnPhong(vec3 p, vec3 n, Object object) {
+        // Set color before applying lighting to the object
+        vec3 color = object.color.diffuse;
+        if (object.type == PLANE) {
+          float result = mod(floor(p.x) + floor(p.z), 2.0);
+          color = vec3(1.0, result, result);
+        }
+        // Ambient
+        vec3 ambient = object.color.ambient + backgroundColor;   // adding ambient color of the background
+        // Diffuse
+        vec3 lightDir = normalize(testLight.center - p);
+        vec3 normal = normalize(n);
+        float diff = max(dot(lightDir, normal), 0.0);
+        vec3 diffuse = diff * color;
+        //Specular
+        vec3 viewDir = normalize(p0 - p);
+        vec3 reflectDir = reflect(-lightDir, normal);
+        float spec = 0.0;
+
+        // blinn-phong
+        vec3 halfwayDir = normalize(lightDir + viewDir);
+        spec = pow(max(dot(normal, halfwayDir), 0.0), 32.0);
+
+        // phong
+        //spec = pow(max(dot(normal, reflectDir), 0.0), 8.0);
+
+        vec3 specular = vec3(0.3) * spec; // assuming bright white light color
+        vec3 finalColor = vec3(ambient + diffuse + specular);
+        return finalColor;
+
+          // float dif = clamp(dot(normalize(testLight.center - p), object.normal), 0.0, 1.0);
+          // float occ = 0.4 + 0.6 * dif;
+          // float amb = clamp(0.5 + 0.5 * object.normal.y, 0.0, 1.0);
+          // float spe = pow(dif, 64.0);
+
+          // vec3 color;
+          // if (object.type == PLANE) {
+          //     float d = mod(floor(p.x)+floor(p.z),2.0);
+          //     object.color.ambient = object.color.diffuse = object.color.specular = vec3(d,d,d)*0.2;
+          // }
+          // color = amb * (testLight.color.ambient + object.color.ambient) * occ;
+          // color += dif * (testLight.color.diffuse + object.color.diffuse) * occ;
+          // color += dif * (spe * testLight.color.specular + object.color.specular) * occ;
+          // //color *= getShadow(pos);
+
+          // return color;
+      }
+
+      void initSceneObjects() {
+        // Initialize test ball
+        testBall.id = 0;
+        testBall.center = vec3(sin(u_time), cos(u_time) + 1.0, -5.0);
+        testBall.normal = vec3(0.0, 0.0, 0.0);
+        testBall.radius = 1.0;
+        testBall.color.ambient = vec3(0.0, 0.0, 0.0);
+        testBall.color.diffuse = vec3(0.0, 1.0, 0.0);
+        testBall.color.specular = vec3(0.0, 0.0, 1.0);
+        testBall.type = SPHERE;
+        sceneObjects[0] = testBall;
+        // Initialize test light
+        testLight.id = 1;
+        testLight.color.ambient = vec3(1.0, 1.0, 1.0);
+        testLight.color.diffuse = vec3(1.0, 1.0, 1.0);
+        testLight.color.specular = vec3(1.0, 1.0, 1.0);
+        testLight.center = vec3(-3.0, 3.0, 0.0);
+        testLight.radius = 0.1;
+        testLight.type = LIGHT;
+        // Initialize test plane
+        testPlane.id = 2;
+        testPlane.center = vec3(0.0, -1.0, 0.0);
+        testPlane.normal = vec3(0.0, 1.0, 0.0);
+        testPlane.radius = 0.0;
+        testPlane.color.ambient = vec3(0.0, 0.0, 0.0);
+        testPlane.color.diffuse = vec3(1.0, 0.0, 0.0);
+        testPlane.color.specular = vec3(1.0, 1.0, 1.0);
+        testPlane.type = PLANE;
+        sceneObjects[2] = testPlane;
+        // Initialize test ball
+        testBall2.id = 3;
+        testBall2.center = vec3(2.0, sin(u_time) / 2.0, -3.0);
+        testBall2.normal = vec3(0.0, 0.0, 0.0);
+        testBall2.radius = 0.5;
+        testBall2.color.ambient = vec3(0.0, 0.0, 0.0);
+        testBall2.color.diffuse = vec3(1.0, 1.0, 0.0);
+        testBall2.color.specular = vec3(1.0, 1.0, 1.0);
+        testBall2.type = SPHERE;
+        sceneObjects[3] = testBall2;
+      }
+
+      // rayObject - the object the ray is being shot from
+      vec3 trace(vec3 p, vec3 direction, int step, Object rayObject) {
+        if (step > MAX_STEPS) {
+          return backgroundColor;
+        }
+
+        IntersectionData q = intersect(p, direction, rayObject);
+
+        if (q.status == 0) {    // no intersection
+          return backgroundColor; //vec3(1.0, 0.1, 1.0); //backgroundColor;
+        }
+        if (q.status == 2) {    // light intersection
+          return testLight.color.specular;
+        }
+
+        vec3 n = getNormal(q);
+        vec3 r = reflect(direction, n);
+
+        vec3 local = blinnPhong(q.point, n, q.object);
+        vec3 reflected = vec3(0.0, 0.0, 0.0); //0.5 * trace(q.point, r, step + 1, q.object);
+        vec3 transmitted = vec3(0.0, 0.0, 0.0);
+
+        vec3 finalColor = local + reflected + transmitted;
+
+        return finalColor;
+      }
+
+      // for-loop version of trace because webgl's version of glsl does not support recursion
+      vec3 traceLoop(vec3 p, vec3 direction, Object rayObject) {
+        vec3 finalColor = vec3(0.0, 0.0, 0.0);
+        float intensityScalar = 1.0;
+        
+        vec3 currentP = p;
+        vec3 currentDirection = direction;
+        Object currentObject = rayObject;
+
+        for (int step = 0; step < MAX_STEPS; ++step) {
+          
+          IntersectionData q = intersect(currentP, currentDirection, currentObject);
+
+          if (q.status == 0) {
+            return finalColor = finalColor + (intensityScalar * backgroundColor);
+            // return finalColor = intensityScalar * (finalColor + backgroundColor);
+          }
+          if (q.status == 2) {
+            return finalColor = finalColor + (intensityScalar * q.object.color.specular);
+            // return finalColor = intensityScalar * (finalColor + q.object.color.specular);
+          }
+
+          vec3 n = getNormal(q);
+          vec3 r = reflect(currentDirection, n);
+
+          vec3 local = blinnPhong(q.point, n, q.object);
+
+          // Calculate shadows
+          vec3 shadowRay = normalize(testLight.center - q.point);
+          IntersectionData shadowIntersection = intersect(q.point, shadowRay, q.object);
+
+          if (shadowIntersection.status == 1) {
+            return intensityScalar * finalColor;// = intensityScalar * 0.9 * local;
+          }
+
+          // finalColor = finalColor + (intensityScalar * local);
+          finalColor = intensityScalar * (finalColor + local);
+
+          // reset "input" variables
+          intensityScalar -= 1.0 / float(MAX_STEPS);
+          // intensityScalar *= 0.3;
+          currentP = q.point;
+          currentDirection = r;
+          currentObject = q.object;
+        }
+        return finalColor;
+      }
+
+      void main(void) {
+        // INIT OBJECTS
+        Object NULL_OBJECT;
+        NULL_OBJECT.id = -1;
+        initSceneObjects();
+
+        // Set up user's eye position, and relative pixel position
+        p0 = vec3(0.0, 0.0, 10.0); // eye position                 // CHANGE WHEN ACCEPTING USER INPUT
+        vec3 p = vec3(fPos[0], fPos[1], 5.0); // pixel coordinate       // CHANGE WHEN ACCEPTING USER INPUT
+        vec3 direction = p - p0;
+
+        // gl_FragColor = vec4(trace(p, direction, 1, NULL_OBJECT), 1.0);
+        gl_FragColor = vec4(traceLoop(p, direction, NULL_OBJECT), 1.0);
+        //gl_FragColor = vec4(color, 1.0);
+      }
+    </script>
+  </head>
+
+  <body onload="webGLStart();">
+    <canvas id="gl-canvas" style="border: none;" width="1000" height="1000"></canvas>
+  </body>
+
+  <script type="text/javascript" src="main.js"></script>
+  <script type="text/javascript" src="common/glMatrix-0.9.5.min.js"></script>
+  <script type="text/javascript" src="common/initShaders.js"></script>
+  <script type="text/javascript" src="common/webgl-utils.js"></script>
+
+</html>
